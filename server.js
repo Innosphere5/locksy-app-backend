@@ -14,6 +14,7 @@
 import express from "express";
 import { createServer } from "http";
 import { Server as SocketIOServer } from "socket.io";
+import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
@@ -30,10 +31,14 @@ const PORT = process.env.PORT || 3000;
 const corsOptions = {
   origin: [
     "http://localhost:3000",
+    "http://192.168.1.2:3000",
     "https://locksy-backend.onrender.com"
   ],
   methods: ["GET", "POST"],
 };
+
+// Use permissive CORS in development
+app.use(cors());
 
 // ─── File Upload Setup ──────────────────────────────────────────────────────
 const uploadDir = path.join(__dirname, "uploads");
@@ -511,7 +516,7 @@ io.on("connection", (socket) => {
    */
   socket.on("send_message", (data, callback) => {
     try {
-      const { id, from, to, text, images, timestamp } = data;
+      const { id, from, to, text, images, timestamp, isViewOnce } = data;
 
       // Validate input
       if (!from || !to || (!text && (!images || images.length === 0)) || !id) {
@@ -529,6 +534,7 @@ io.on("connection", (socket) => {
         to, // Recipient's phone number
         text: text ? text.trim() : "",
         images: images || [],
+        isViewOnce: isViewOnce || false,
         timestamp: timestamp || new Date().toISOString(),
         deliveryStatus: "sending",
       };
@@ -638,7 +644,20 @@ io.on("connection", (socket) => {
         return;
       }
 
+      // Enforce 5 member limit (including creator)
+      if (group.members.length > 5) {
+        console.log(`[CreateGroup] ❌ Rejected group ${group.name}: Too many members (${group.members.length})`);
+        if (callback) callback({ success: false, error: "Group member limit is 5 persons" });
+        return;
+      }
+
       console.log(`[CreateGroup] Broadcasting new group: ${group.name} to ${group.members.length} members`);
+
+      // Add status to members if not present
+      group.members = group.members.map(member => ({
+        ...member,
+        status: member.phoneNumber === group.createdBy ? 'accepted' : (member.status || 'pending')
+      }));
 
       // Persist group on server
       const existingIndex = groupRegistry.findIndex(g => g.id === group.id);
@@ -809,6 +828,104 @@ io.on("connection", (socket) => {
   });
 
   /**
+   * LEAVE GROUP EVENT
+   * Removes member from group and notifies others
+   */
+  socket.on("leave_group", (data, callback) => {
+    try {
+      const { groupId, phoneNumber } = data;
+      if (!groupId || !phoneNumber) {
+        if (callback) callback({ success: false, error: "Missing groupId or phoneNumber" });
+        return;
+      }
+
+      console.log(`[LeaveGroup] User ${phoneNumber} leaving group ${groupId}`);
+
+      const groupIndex = groupRegistry.findIndex(g => g.id === groupId);
+      if (groupIndex === -1) {
+        if (callback) callback({ success: false, error: "Group not found" });
+        return;
+      }
+
+      const group = groupRegistry[groupIndex];
+      const updatedMembers = group.members.filter(m => m.phoneNumber !== phoneNumber);
+
+      // If last member leaves, we could delete the group, but let's just update for now
+      group.members = updatedMembers;
+      saveGroups();
+
+      // Notify other members
+      group.members.forEach((member) => {
+        const memberPhone = member.phoneNumber;
+        const recipientInfo = getPhoneUserInfo(memberPhone);
+        if (recipientInfo && recipientInfo.isOnline && recipientInfo.socketIds.length > 0) {
+          io.to(memberPhone).emit("group_updated", { group });
+        } else {
+          storeOfflineMessage(memberPhone, { type: 'group_updated', group });
+        }
+      });
+
+      if (callback) callback({ success: true });
+    } catch (error) {
+      console.error(`[LeaveGroup] Error:`, error);
+      if (callback) callback({ success: false, error: error.message });
+    }
+  });
+
+  /**
+   * DELETE GROUP EVENT
+   * Permanently deletes group and notifies all members
+   */
+  socket.on("delete_group", (data, callback) => {
+    try {
+      const { groupId, adminPhone } = data;
+      if (!groupId) {
+        if (callback) callback({ success: false, error: "Missing groupId" });
+        return;
+      }
+
+      console.log(`[DeleteGroup] Deleting group ${groupId}`);
+
+      const groupIndex = groupRegistry.findIndex(g => g.id === groupId);
+      if (groupIndex === -1) {
+        if (callback) callback({ success: false, error: "Group not found" });
+        return;
+      }
+
+      const group = groupRegistry[groupIndex];
+      
+      // Verification: only admin can delete
+      if (adminPhone && group.adminPhone !== adminPhone) {
+        if (callback) callback({ success: false, error: "Only admin can delete group" });
+        return;
+      }
+
+      // Keep a copy of members to notify them
+      const membersToNotify = [...group.members];
+
+      // Remove from registry
+      groupRegistry.splice(groupIndex, 1);
+      saveGroups();
+
+      // Notify all members
+      membersToNotify.forEach((member) => {
+        const memberPhone = member.phoneNumber;
+        const recipientInfo = getPhoneUserInfo(memberPhone);
+        if (recipientInfo && recipientInfo.isOnline && recipientInfo.socketIds.length > 0) {
+          io.to(memberPhone).emit("group_deleted", { groupId });
+        } else {
+          storeOfflineMessage(memberPhone, { type: 'group_deleted', groupId });
+        }
+      });
+
+      if (callback) callback({ success: true });
+    } catch (error) {
+      console.error(`[DeleteGroup] Error:`, error);
+      if (callback) callback({ success: false, error: error.message });
+    }
+  });
+
+  /**
    * SEND MESSAGE EVENT (OLD - USER ID BASED)
    * Kept for backward compatibility
    */
@@ -956,6 +1073,117 @@ io.on("connection", (socket) => {
     } catch (error) {
       console.error(`[RequestOnlineUsers] Error:`, error);
       callback({ success: false, error: error.message });
+    }
+  });
+
+  /**
+   * VIEW-ONCE MESSAGE SEEN EVENT
+   * Receiver notifies server that a view-once message was opened.
+   * Server relays to sender so both sides can show encrypted state.
+   * Event: client.emit("view_once_seen", { senderPhone, messageId })
+   */
+  socket.on("view_once_seen", (data, callback) => {
+    try {
+      const { senderPhone, messageId } = data;
+      if (!senderPhone || !messageId) {
+        if (callback) callback({ success: false, error: "Missing senderPhone or messageId" });
+        return;
+      }
+
+      console.log(`[ViewOnceSeen] Message ${messageId} opened, notifying sender ${senderPhone}`);
+
+      const senderInfo = getPhoneUserInfo(senderPhone);
+      if (senderInfo && senderInfo.isOnline && senderInfo.socketIds.length > 0) {
+        io.to(senderPhone).emit("view_once_opened", { messageId });
+        console.log(`[ViewOnceSeen] ✅ Notified sender ${senderPhone} (online)`);
+      } else {
+        // Queue for offline delivery so sender learns about it on reconnect
+        storeOfflineMessage(senderPhone, {
+          type: "view_once_opened",
+          messageId,
+          isSystemEvent: true,
+        });
+        console.log(`[ViewOnceSeen] 💾 Sender ${senderPhone} offline, queued notification`);
+      }
+
+      if (callback) callback({ success: true, messageId });
+    } catch (error) {
+      console.error(`[ViewOnceSeen] Error:`, error);
+      if (callback) callback({ success: false, error: error.message });
+    }
+  });
+
+  /**
+   * REACT TO MESSAGE EVENT
+   * User sends an emoji reaction on a message, server relays to recipient.
+   * Event: client.emit("react_message", { to, messageId, emoji, reactorPhone })
+   */
+  socket.on("react_message", (data, callback) => {
+    try {
+      const { to, messageId, emoji, reactorPhone } = data;
+      if (!to || !messageId || !emoji || !reactorPhone) {
+        if (callback) callback({ success: false, error: "Missing required fields: to, messageId, emoji, reactorPhone" });
+        return;
+      }
+
+      console.log(`[ReactMessage] ${reactorPhone} reacted ${emoji} on ${messageId} → ${to}`);
+
+      const recipientInfo = getPhoneUserInfo(to);
+      if (recipientInfo && recipientInfo.isOnline && recipientInfo.socketIds.length > 0) {
+        io.to(to).emit("message_reacted", { messageId, emoji, reactorPhone });
+        console.log(`[ReactMessage] ✅ Delivered reaction to ${to} (online)`);
+      } else {
+        storeOfflineMessage(to, {
+          type: "message_reacted",
+          messageId,
+          emoji,
+          reactorPhone,
+          isSystemEvent: true,
+        });
+        console.log(`[ReactMessage] 💾 ${to} offline, queued reaction`);
+      }
+
+      if (callback) callback({ success: true, messageId });
+    } catch (error) {
+      console.error(`[ReactMessage] Error:`, error);
+      if (callback) callback({ success: false, error: error.message });
+    }
+  });
+
+  /**
+   * DELETE MESSAGE EVENT
+   * Supports both "delete for me" (no relay) and "delete for everyone" (relay to other party).
+   * Event: client.emit("delete_message", { to, messageId, deleteForEveryone })
+   */
+  socket.on("delete_message", (data, callback) => {
+    try {
+      const { to, messageId, deleteForEveryone } = data;
+      if (!to || !messageId) {
+        if (callback) callback({ success: false, error: "Missing required fields: to, messageId" });
+        return;
+      }
+
+      console.log(`[DeleteMessage] messageId: ${messageId}, to: ${to}, forEveryone: ${deleteForEveryone}`);
+
+      if (deleteForEveryone) {
+        const recipientInfo = getPhoneUserInfo(to);
+        if (recipientInfo && recipientInfo.isOnline && recipientInfo.socketIds.length > 0) {
+          io.to(to).emit("message_deleted", { messageId });
+          console.log(`[DeleteMessage] ✅ Delete relayed to ${to} (online)`);
+        } else {
+          storeOfflineMessage(to, {
+            type: "message_deleted",
+            messageId,
+            isSystemEvent: true,
+          });
+          console.log(`[DeleteMessage] 💾 ${to} offline, queued delete`);
+        }
+      }
+
+      if (callback) callback({ success: true, messageId });
+    } catch (error) {
+      console.error(`[DeleteMessage] Error:`, error);
+      if (callback) callback({ success: false, error: error.message });
     }
   });
 

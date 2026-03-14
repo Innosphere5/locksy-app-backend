@@ -1,0 +1,66 @@
+[
+  {
+    "id": "mmqasyzj_ma9afuujhga_s5wp0nn5kjj",
+    "name": "Innosphere group",
+    "description": "",
+    "members": [
+      {
+        "name": "sohel ",
+        "phoneNumber": "+917889130942",
+        "isAdmin": true,
+        "status": "accepted"
+      },
+      {
+        "name": "Gagan Brother",
+        "phoneNumber": "+919877648774",
+        "contactId": "26",
+        "status": "accepted"
+      },
+      {
+        "name": "Guruji",
+        "phoneNumber": "+917973814865",
+        "contactId": "75",
+        "status": "pending"
+      },
+      {
+        "name": "Gourav Sir",
+        "phoneNumber": "+918360433321",
+        "contactId": "128",
+        "status": "pending"
+      }
+    ],
+    "adminPhone": "+917889130942",
+    "createdAt": 1773491089944,
+    "lastMessage": null,
+    "lastMessageTime": null,
+    "avatar": "/uploads/1773491089301-770053831-6e3d18bc-d495-4a87-8140-597b5f0101bc.jpeg",
+    "color": "#98D8C8",
+    "timestamp": 1773491089944
+  },
+  {
+    "id": "mmqc18iv_d2vho5okas9_ti5kswh94c",
+    "name": "innosphere",
+    "description": "",
+    "members": [
+      {
+        "name": "gagan",
+        "phoneNumber": "+919877648774",
+        "isAdmin": true,
+        "status": "accepted"
+      },
+      {
+        "name": "Gurvinder \r",
+        "phoneNumber": "+917973814865",
+        "contactId": "AED9582F-9E78-4528-B981-91D2CC5AE669:ABPerson",
+        "status": "pending"
+      }
+    ],
+    "adminPhone": "+919877648774",
+    "createdAt": 1773493155173,
+    "lastMessage": null,
+    "lastMessageTime": null,
+    "avatar": "/uploads/1773493154167-718467892-983C155A-12FB-46F4-BF88-1F7FB1E83998.jpg",
+    "color": "#45B7D1",
+    "timestamp": 1773493155173
+  }
+]
