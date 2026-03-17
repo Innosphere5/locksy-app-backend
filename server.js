@@ -69,8 +69,13 @@ app.use("/uploads", (req, res, next) => {
   const filePath = path.join(uploadDir, req.path);
   const ext = path.extname(req.path).toLowerCase();
   const videoMimes = { '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm', '.mkv': 'video/x-matroska' };
+  const audioMimes = { '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg' };
+  
   if (videoMimes[ext]) {
     res.setHeader('Content-Type', videoMimes[ext]);
+    res.setHeader('Accept-Ranges', 'bytes');
+  } else if (audioMimes[ext]) {
+    res.setHeader('Content-Type', audioMimes[ext]);
     res.setHeader('Accept-Ranges', 'bytes');
   }
   next();
@@ -795,14 +800,52 @@ io.on("connection", (socket) => {
         return;
       }
 
+      // Verify group exists and get its index
+      const existingIndex = groupRegistry.findIndex(g => g.id === group.id);
+
+      if (existingIndex === -1) {
+        console.log(`[UpdateGroup] ❌ Group ${group.id} not found on server`);
+        if (callback) callback({ success: false, error: "Group not found" });
+        return;
+      }
+
+      const oldGroup = groupRegistry[existingIndex];
+
+      // Verification: only admin can update group
+      // Use socket.phoneNumber for secure verification
+      if (oldGroup.adminPhone !== socket.phoneNumber) {
+        console.log(`[UpdateGroup] ❌ Unauthorized update attempt by ${socket.phoneNumber} (Admin is ${oldGroup.adminPhone})`);
+        if (callback) callback({ success: false, error: "Only admin can update group" });
+        return;
+      }
+
       console.log(`[UpdateGroup] Broadcasting updated group: ${group.name}`);
 
-      // Persist updated group on server
-      const existingIndex = groupRegistry.findIndex(g => g.id === group.id);
-      if (existingIndex >= 0) {
-        groupRegistry[existingIndex] = group;
-        saveGroups();
-      }
+      // Detect removed members and notify them
+      const oldMembers = oldGroup.members || [];
+      const newMembers = group.members || [];
+      
+      const removedMembers = oldMembers.filter(oldM => 
+        !newMembers.some(newM => newM.phoneNumber === oldM.phoneNumber)
+      );
+
+      removedMembers.forEach(member => {
+        const memberPhone = member.phoneNumber;
+        const recipientInfo = getPhoneUserInfo(memberPhone);
+        if (recipientInfo && recipientInfo.isOnline && recipientInfo.socketIds.length > 0) {
+          io.to(memberPhone).emit("group_deleted", { groupId: group.id });
+          console.log(`[UpdateGroup] 🗑️ Notified removed member ${memberPhone} (online)`);
+        } else {
+          storeOfflineMessage(memberPhone, {
+            type: 'group_deleted',
+            groupId: group.id
+          });
+          console.log(`[UpdateGroup] 💾 Queued deletion for removed member ${memberPhone} (offline)`);
+        }
+      });
+
+      groupRegistry[existingIndex] = group;
+      saveGroups();
 
       group.members.forEach((member) => {
         const memberPhone = member.phoneNumber;
@@ -865,6 +908,16 @@ io.on("connection", (socket) => {
         }
       });
 
+      // Notify the leaving user immediately so their UI removes the group
+      const leaverInfo = getPhoneUserInfo(phoneNumber);
+      if (leaverInfo && leaverInfo.isOnline && leaverInfo.socketIds.length > 0) {
+        io.to(phoneNumber).emit("group_deleted", { groupId });
+        console.log(`[LeaveGroup] 🗑️ Notified leaver ${phoneNumber} (online)`);
+      } else {
+        storeOfflineMessage(phoneNumber, { type: 'group_deleted', groupId });
+        console.log(`[LeaveGroup] 💾 Queued deletion for leaver ${phoneNumber} (offline)`);
+      }
+
       if (callback) callback({ success: true });
     } catch (error) {
       console.error(`[LeaveGroup] Error:`, error);
@@ -895,7 +948,8 @@ io.on("connection", (socket) => {
       const group = groupRegistry[groupIndex];
       
       // Verification: only admin can delete
-      if (adminPhone && group.adminPhone !== adminPhone) {
+      if (group.adminPhone !== socket.phoneNumber) {
+        console.log(`[DeleteGroup] ❌ Unauthorized delete attempt by ${socket.phoneNumber} (Admin is ${group.adminPhone})`);
         if (callback) callback({ success: false, error: "Only admin can delete group" });
         return;
       }
